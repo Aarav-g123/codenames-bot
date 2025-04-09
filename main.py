@@ -1,12 +1,128 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
 from datamuse import datamuse
 from functools import lru_cache
 import string
 import wikipediaapi
 import requests
 
+class CodenamesGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Codenames Spymaster Assistant")
+        
+        self.team_colors = {
+            'Red': '#ff6666',
+            'Blue': '#6666ff',
+            'Neutral': '#ffff99',
+            'Assassin': '#444444'
+        }
+        
+        self.current_team = 'Red'
+        self.word_grid = []
+        self.game_words = []
+        self.spymaster_team = 'Red'
+        
+        self.create_widgets()
+        self.setup_grid()
+        
+    def create_widgets(self):
+        self.control_frame = ttk.Frame(self.root)
+        self.control_frame.pack(pady=10)
+        
+        self.team_selector = ttk.Combobox(self.control_frame, 
+                                       values=['Red', 'Blue'],
+                                       state='readonly')
+        self.team_selector.set('Red')
+        self.team_selector.pack(side=tk.LEFT, padx=5)
+        
+        self.generate_btn = ttk.Button(self.control_frame, text="Generate Clues",
+                                     command=self.generate_clues)
+        self.generate_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.clue_frame = ttk.Frame(self.root)
+        self.clue_frame.pack(pady=10)
+        
+        self.clue_listbox = tk.Listbox(self.clue_frame, height=10, width=30)
+        self.clue_listbox.pack(side=tk.LEFT)
+        
+        self.grid_frame = ttk.Frame(self.root)
+        self.grid_frame.pack(pady=10)
+
+    def setup_grid(self):
+        self.cells = []
+        for row in range(5):
+            row_cells = []
+            for col in range(5):
+                cell = tk.Button(self.grid_frame, text="", width=10, height=3,
+                                command=lambda r=row, c=col: self.set_cell_team(r, c))
+                cell.grid(row=row, column=col, padx=2, pady=2)
+                row_cells.append(cell)
+            self.cells.append(row_cells)
+        
+        self.load_words_popup()
+
+    def load_words_popup(self):
+        popup = tk.Toplevel()
+        popup.title("Enter Codenames")
+        
+        tk.Label(popup, text="Enter 25 words (comma-separated):").pack(padx=10, pady=5)
+        self.words_entry = tk.Text(popup, height=10, width=40)
+        self.words_entry.pack(padx=10, pady=5)
+        
+        ttk.Button(popup, text="Load", command=lambda: self.process_words(popup)).pack(pady=5)
+
+    def process_words(self, popup):
+        words = self.words_entry.get(1.0, tk.END).strip().replace('\n', '').split(',')
+        if len(words) != 25:
+            messagebox.showerror("Error", "Please enter exactly 25 words")
+            return
+        
+        self.game_words = [w.strip() for w in words]
+        for row in range(5):
+            for col in range(5):
+                self.cells[row][col].config(text=self.game_words[row*5 + col])
+        popup.destroy()
+
+    def set_cell_team(self, row, col):
+        current_color = self.cells[row][col].cget('bg')
+        teams = list(self.team_colors.keys())
+        current_index = teams.index(self.current_team) if current_color == 'SystemButtonFace' else \
+                       list(self.team_colors.values()).index(current_color)
+        new_index = (current_index + 1) % len(self.team_colors)
+        new_team = list(self.team_colors.keys())[new_index]
+        
+        self.cells[row][col].config(bg=self.team_colors[new_team])
+        self.current_team = new_team
+
+    def generate_clues(self):
+        self.spymaster_team = self.team_selector.get()
+        target_words = []
+        avoid_words = []
+        
+        for row in range(5):
+            for col in range(5):
+                word = self.game_words[row*5 + col]
+                cell_color = self.cells[row][col].cget('bg')
+                
+                if cell_color == self.team_colors[self.spymaster_team]:
+                    target_words.append(word)
+                elif cell_color != self.team_colors['Neutral']:
+                    avoid_words.append(word)
+        
+        if not target_words:
+            messagebox.showwarning("Warning", "No target words selected!")
+            return
+        
+        helper = CodenamesHelper()
+        associations = helper.find_common_associations(target_words, avoid_words)
+        sorted_hints = helper.get_sorted_hints(associations)
+        
+        self.clue_listbox.delete(0, tk.END)
+        for hint, score in sorted_hints[:10]:
+            self.clue_listbox.insert(tk.END, f"{hint} ({score:.1f})")
+
 class CodenamesHelper:
-    """Core engine for processing word associations and generating hints"""
-    
     def __init__(self):
         self.datamuse = datamuse.Datamuse()
         self.datamuse.set_max_default(1000)
@@ -20,13 +136,11 @@ class CodenamesHelper:
         }
 
     def get_wikipedia_links(self, word):
-        """Retrieve related terms from Wikipedia page links"""
         page = self.wikipedia.page(word)
         return list(page.links.keys()) if page.exists() else []
 
     @lru_cache(maxsize=100)
     def _query_datamuse(self, relation, word):
-        """Generic method for Datamuse API queries with error handling"""
         try:
             results = self.datamuse.words(**{relation: word})
             return {item['word']: item['score'] for item in results}
@@ -34,23 +148,12 @@ class CodenamesHelper:
             return {}
 
     def get_adjectives(self, word):
-        """Fetch adjectives related to the given word"""
         return self._query_datamuse('rel_jja', word)
 
     def get_nouns(self, word):
-        """Fetch nouns associated with the given word"""
         return self._query_datamuse('rel_jjb', word)
 
-    def get_triggers(self, word):
-        """Find words typically triggered by the given word"""
-        return self._query_datamuse('rel_trg', word)
-
-    def get_contextual(self, word):
-        """Retrieve words appearing in similar contexts"""
-        return self._query_datamuse('lc', word)
-
     def _normalize_scores(self, scores):
-        """Normalize scores to 0-100 scale for comparison"""
         if not scores:
             return {}
         max_score = max(scores.values())
@@ -59,13 +162,7 @@ class CodenamesHelper:
                 for word, score in scores.items()}
 
     def _combine_data_sources(self, word):
-        """Aggregate and weight data from multiple sources"""
-        sources = [
-            self.get_adjectives(word),
-            self.get_nouns(word),
-            self.get_triggers(word),
-            self.get_contextual(word)
-        ]
+        sources = [self.get_adjectives(word), self.get_nouns(word)]
         combined = {}
         
         for source in sources:
@@ -79,66 +176,22 @@ class CodenamesHelper:
                 
         return combined
 
-    def find_common_associations(self, words):
-        """Identify shared associations across multiple words"""
-        word_data = [self._combine_data_sources(word) for word in words]
+    def find_common_associations(self, target_words, avoid_words):
+        word_data = [self._combine_data_sources(word) for word in target_words]
         common_terms = set.intersection(*[set(data) for data in word_data])
         
         return {
             term: sum(source[term] for source in word_data)
             for term in common_terms
             if term.lower() not in self.common_words
-            and term.lower() not in map(str.lower, words)
+            and term.lower() not in [w.lower() for w in (target_words + avoid_words)]
             and term not in string.punctuation
         }
 
     def get_sorted_hints(self, associations):
-        """Sort hints by descending score then alphabetical order"""
         return sorted(associations.items(), key=lambda x: (-x[1], x[0]))
 
-class UserInterface:
-    """Handles all user interactions and output formatting"""
-    
-    @staticmethod
-    def get_words():
-        """Collect words from user with validation"""
-        words = []
-        print("Enter at least 2 words (type 'done' when finished):")
-        
-        while len(words) < 2:
-            word = input(f"Word {len(words)+1}: ").strip().lower()
-            if word and word.isalpha():
-                words.append(word)
-        
-        while True:
-            word = input("Next word or 'done': ").strip().lower()
-            if word == 'done':
-                break
-            if word and word.isalpha():
-                words.append(word)
-        
-        return words
-
-    @staticmethod
-    def display_results(words, associations):
-        """Display results in clean formatted output"""
-        if not associations:
-            print("\nNo valid hints found.")
-            return
-        
-        print(f"\nTop hints for {', '.join(words)}:")
-        for term, score in associations[:15]:
-            print(f"  {term:<15} {score:.1f}")
-
-def main():
-    helper = CodenamesHelper()
-    ui = UserInterface()
-    
-    target_words = ui.get_words()
-    associations = helper.find_common_associations(target_words)
-    sorted_hints = helper.get_sorted_hints(associations)
-    
-    ui.display_results(target_words, sorted_hints)
-
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = CodenamesGUI(root)
+    root.mainloop()
