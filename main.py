@@ -73,16 +73,19 @@ class CodenamesGUI:
         ttk.Button(popup, text="Load", command=lambda: self.process_words(popup)).pack(pady=5)
 
     def process_words(self, popup):
-        words = self.words_entry.get(1.0, tk.END).strip().replace('\n', '').split(',')
-        if len(words) != 25:
-            messagebox.showerror("Error", "Please enter exactly 25 words")
-            return
-        
-        self.game_words = [w.strip() for w in words]
-        for row in range(5):
-            for col in range(5):
-                self.cells[row][col].config(text=self.game_words[row*5 + col])
-        popup.destroy()
+        try:
+            words = self.words_entry.get(1.0, tk.END).strip().replace('\n', '').split(',')
+            if len(words) != 25:
+                messagebox.showerror("Error", "Please enter exactly 25 words")
+                return
+            
+            self.game_words = [w.strip() for w in words]
+            for row in range(5):
+                for col in range(5):
+                    self.cells[row][col].config(text=self.game_words[row*5 + col])
+            popup.destroy()
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid input: {str(e)}")
 
     def set_cell_team(self, row, col):
         current_color = self.cells[row][col].cget('bg')
@@ -96,31 +99,37 @@ class CodenamesGUI:
         self.current_team = new_team
 
     def generate_clues(self):
-        self.spymaster_team = self.team_selector.get()
-        target_words = []
-        avoid_words = []
-        
-        for row in range(5):
-            for col in range(5):
-                word = self.game_words[row*5 + col]
-                cell_color = self.cells[row][col].cget('bg')
+        try:
+            self.spymaster_team = self.team_selector.get()
+            target_words = []
+            avoid_words = []
+            
+            for row in range(5):
+                for col in range(5):
+                    word = self.game_words[row*5 + col]
+                    cell_color = self.cells[row][col].cget('bg')
+                    
+                    if cell_color == self.team_colors[self.spymaster_team]:
+                        target_words.append(word)
+                    elif cell_color != self.team_colors['Neutral']:
+                        avoid_words.append(word)
+            
+            if not target_words:
+                messagebox.showwarning("Warning", "No target words selected!")
+                return
+            
+            helper = CodenamesHelper()
+            associations = helper.find_common_associations(target_words, avoid_words)
+            sorted_hints = helper.get_sorted_hints(associations)
+            
+            self.clue_listbox.delete(0, tk.END)
+            for hint, score in sorted_hints[:15]:
+                self.clue_listbox.insert(tk.END, f"{hint} ({score:.1f})")
                 
-                if cell_color == self.team_colors[self.spymaster_team]:
-                    target_words.append(word)
-                elif cell_color != self.team_colors['Neutral']:
-                    avoid_words.append(word)
-        
-        if not target_words:
-            messagebox.showwarning("Warning", "No target words selected!")
-            return
-        
-        helper = CodenamesHelper()
-        associations = helper.find_common_associations(target_words, avoid_words)
-        sorted_hints = helper.get_sorted_hints(associations)
-        
-        self.clue_listbox.delete(0, tk.END)
-        for hint, score in sorted_hints[:10]:
-            self.clue_listbox.insert(tk.END, f"{hint} ({score:.1f})")
+            if not sorted_hints:
+                messagebox.showinfo("Info", "No valid clues found. Try different word combinations.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to generate clues: {str(e)}")
 
 class CodenamesHelper:
     def __init__(self):
@@ -153,40 +162,59 @@ class CodenamesHelper:
     def get_nouns(self, word):
         return self._query_datamuse('rel_jjb', word)
 
+    def get_triggers(self, word):
+        return self._query_datamuse('rel_trg', word)
+
+    def get_contextual(self, word):
+        return self._query_datamuse('lc', word)
+
     def _normalize_scores(self, scores):
         if not scores:
             return {}
-        max_score = max(scores.values())
-        min_score = min(scores.values())
-        return {word: 100 * (score - min_score) / (max_score - min_score)
-                for word, score in scores.items()}
+        scores_list = list(scores.values())
+        max_score = max(scores_list) if scores_list else 1
+        min_score = min(scores_list) if scores_list else 0
+        return {k: 100 * (v - min_score) / (max_score - min_score) if (max_score - min_score) != 0 else 50
+                for k, v in scores.items()}
 
     def _combine_data_sources(self, word):
-        sources = [self.get_adjectives(word), self.get_nouns(word)]
+        sources = [
+            self.get_adjectives(word),
+            self.get_nouns(word),
+            self.get_triggers(word),
+            self.get_contextual(word)
+        ]
         combined = {}
         
         for source in sources:
-            for term, score in self._normalize_scores(source).items():
+            normalized = self._normalize_scores(source)
+            for term, score in normalized.items():
                 if ' ' not in term:
-                    combined[term] = combined.get(term, 0) + score
+                    combined[term] = combined.get(term, 0) + score * 0.7
         
-        for term in self.get_wikipedia_links(word):
+        wiki_terms = self.get_wikipedia_links(word)
+        for term in wiki_terms:
             if ' ' not in term:
                 combined[term] = combined.get(term, 0) + 100
-                
+        
         return combined
 
     def find_common_associations(self, target_words, avoid_words):
-        word_data = [self._combine_data_sources(word) for word in target_words]
-        common_terms = set.intersection(*[set(data) for data in word_data])
+        all_terms = {}
+        for word in target_words:
+            word_associations = self._combine_data_sources(word)
+            for term, score in word_associations.items():
+                all_terms[term] = all_terms.get(term, 0) + score
         
-        return {
-            term: sum(source[term] for source in word_data)
-            for term in common_terms
+        filtered = {
+            term: total_score
+            for term, total_score in all_terms.items()
             if term.lower() not in self.common_words
             and term.lower() not in [w.lower() for w in (target_words + avoid_words)]
             and term not in string.punctuation
         }
+        
+        return filtered
 
     def get_sorted_hints(self, associations):
         return sorted(associations.items(), key=lambda x: (-x[1], x[0]))
