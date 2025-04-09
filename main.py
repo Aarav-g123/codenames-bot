@@ -5,6 +5,7 @@ from functools import lru_cache
 import string
 import wikipediaapi
 import requests
+from collections import defaultdict
 
 class CodenamesGUI:
     def __init__(self, root):
@@ -123,8 +124,11 @@ class CodenamesGUI:
             sorted_hints = helper.get_sorted_hints(associations)
             
             self.clue_listbox.delete(0, tk.END)
-            for hint, score in sorted_hints[:15]:
-                self.clue_listbox.insert(tk.END, f"{hint} ({score:.1f})")
+            for hint_data in sorted_hints[:15]:
+                count = hint_data['count']
+                score = hint_data['score']
+                word = hint_data['word']
+                self.clue_listbox.insert(tk.END, f"{count} - {word} ({score:.1f})")
                 
             if not sorted_hints:
                 messagebox.showinfo("Info", "No valid clues found. Try different word combinations.")
@@ -200,24 +204,42 @@ class CodenamesHelper:
         return combined
 
     def find_common_associations(self, target_words, avoid_words):
-        all_terms = {}
-        for word in target_words:
-            word_associations = self._combine_data_sources(word)
+        connection_map = defaultdict(lambda: {'words': set(), 'total_score': 0})
+        avoid_set = {w.lower() for w in avoid_words}
+        
+        for target_word in target_words:
+            word_associations = self._combine_data_sources(target_word)
             for term, score in word_associations.items():
-                all_terms[term] = all_terms.get(term, 0) + score
-        
-        filtered = {
-            term: total_score
-            for term, total_score in all_terms.items()
-            if term.lower() not in self.common_words
-            and term.lower() not in [w.lower() for w in (target_words + avoid_words)]
-            and term not in string.punctuation
+                term_lower = term.lower()
+                if (term_lower not in self.common_words and
+                    term_lower not in avoid_set and
+                    term_lower not in {w.lower() for w in target_words} and
+                    term not in string.punctuation):
+                    
+                    connection_map[term]['words'].add(target_word)
+                    connection_map[term]['total_score'] += score
+
+        return {
+            term: {
+                'count': len(data['words']),
+                'score': data['total_score'],
+                'words': data['words']
+            }
+            for term, data in connection_map.items()
         }
-        
-        return filtered
 
     def get_sorted_hints(self, associations):
-        return sorted(associations.items(), key=lambda x: (-x[1], x[0]))
+        def sort_key(item):
+            term = item[0]
+            data = item[1]
+            # Prioritize clues that connect more words, then higher scores
+            return (-data['count'], -data['score'], term)
+        
+        sorted_terms = sorted(associations.items(), key=sort_key)
+        return [
+            {'word': term, 'count': data['count'], 'score': data['score']}
+            for term, data in sorted_terms
+        ]
 
 if __name__ == "__main__":
     root = tk.Tk()
