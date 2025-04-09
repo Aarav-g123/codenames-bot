@@ -154,6 +154,8 @@ class CodenamesHelper:
             'i', 'a', 'an', 'the', 'and', 'but', 'or', 'to', 'of', 'in',
             'on', 'at', 'for', 'with', 'by', 'from', 'up', 'out', 'if', 'as'
         }
+        self.min_word_frequency = 2.0
+        self.min_connection_count = 2
 
     def get_wikipedia_links(self, word):
         page = self.wikipedia.page(word)
@@ -162,9 +164,20 @@ class CodenamesHelper:
     @lru_cache(maxsize=100)
     def _query_datamuse(self, relation, word):
         try:
-            results = self.datamuse.words(**{relation: word})
-            return {item['word']: item['score'] for item in results}
-        except requests.exceptions.RequestException:
+            results = self.datamuse.words(
+                **{relation: word},
+                md='f'
+            )
+            return {
+                item['word']: {
+                    'score': item['score'],
+                    'freq': float(item.get('tags', ['0'])[0].split(':')[-1]),
+                    'pos': item.get('tags', [''])[-1].split(':')[-1]
+                }
+                for item in results
+                if 'tags' in item and len(item['tags']) >= 2
+            }
+        except Exception as e:
             return {}
 
     def get_adjectives(self, word):
@@ -178,7 +191,17 @@ class CodenamesHelper:
 
     def get_contextual(self, word):
         return self._query_datamuse('lc', word)
+    def _is_valid_term(self, term, target_words):
+        term_lower = term.lower()
 
+        return (
+            len(term) > 3 and  
+            term_lower not in self.common_words and
+            not any(c in term for c in string.punctuation) and
+            not any(t.lower() in term_lower for t in target_words) and  
+            not any(term_lower in t.lower() for t in target_words)
+        )
+    
     def _normalize_scores(self, scores):
         if not scores:
             return {}
@@ -195,45 +218,70 @@ class CodenamesHelper:
             self.get_triggers(word),
             self.get_contextual(word)
         ]
-        combined = {}
+        
+        combined = defaultdict(float)
+        wiki_terms = self.get_wikipedia_links(word)
         
         for source in sources:
-            normalized = self._normalize_scores(source)
-            for term, score in normalized.items():
-                if ' ' not in term:
-                    combined[term] = combined.get(term, 0) + score * 0.7
-        
-        wiki_terms = self.get_wikipedia_links(word)
+            for term, data in source.items():
+                if not self._is_valid_term(term, [word]):
+                    continue
+
+                if data['freq'] < self.min_word_frequency:
+                    continue
+                if data['pos'] not in ('adj', 'n'):
+                    continue
+
+                weight = 1.0
+                if data['pos'] == 'adj':
+                    weight *= 1.2 
+                if term in wiki_terms:
+                    weight *= 1.5  
+                
+                combined[term] += data['score'] * weight
+
         for term in wiki_terms:
-            if ' ' not in term:
-                combined[term] = combined.get(term, 0) + 100
-        
+            if self._is_valid_term(term, [word]):
+                combined[term] += 80 
+
         return combined
 
     def find_common_associations(self, target_words, avoid_words):
-        connection_map = defaultdict(lambda: {'words': set(), 'total_score': 0})
-        avoid_set = {w.lower() for w in avoid_words}
+        connection_map = defaultdict(lambda: {
+            'words': set(),
+            'scores': defaultdict(float),
+            'total_score': 0
+        })
         
         for target_word in target_words:
             word_associations = self._combine_data_sources(target_word)
             for term, score in word_associations.items():
                 term_lower = term.lower()
-                if (term_lower not in self.common_words and
-                    term_lower not in avoid_set and
-                    term_lower not in {w.lower() for w in target_words} and
-                    term not in string.punctuation):
-                    
-                    connection_map[term]['words'].add(target_word)
-                    connection_map[term]['total_score'] += score
+                if (term_lower in {w.lower() for w in target_words} or
+                    term_lower in {w.lower() for w in avoid_words}):
+                    continue
+                
+                connection_map[term]['words'].add(target_word)
+                connection_map[term]['scores'][target_word] = score
+                connection_map[term]['total_score'] += score
 
-        return {
-            term: {
-                'count': len(data['words']),
-                'score': data['total_score'],
-                'words': data['words']
-            }
-            for term, data in connection_map.items()
-        }
+        filtered = {}
+        for term, data in connection_map.items():
+            if (len(data['words']) >= self.min_connection_count and
+                self._is_valid_term(term, target_words)):
+
+                base_score = data['total_score']
+                count_boost = len(data['words']) * 50
+                final_score = base_score + count_boost
+                
+                filtered[term] = {
+                    'count': len(data['words']),
+                    'score': final_score,
+                    'words': data['words'],
+                    'breakdown': dict(data['scores'])
+                }
+
+        return filtered
 
     def get_sorted_hints(self, associations):
         def sort_key(item):
