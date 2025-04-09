@@ -124,10 +124,17 @@ class CodenamesGUI:
             sorted_hints = helper.get_sorted_hints(associations)
             
             self.clue_listbox.delete(0, tk.END)
+            print("\nTOP CLUES DEBUG:")  # Debug header
             for hint_data in sorted_hints[:15]:
                 count = hint_data['count']
                 score = hint_data['score']
                 word = hint_data['word']
+                connected_words = ", ".join(sorted(hint_data['connected_words']))
+                
+                # Console debug output
+                print(f"Clue: {word} ({score:.1f}) | Links {count} words: {connected_words}")
+                
+                # GUI display
                 self.clue_listbox.insert(tk.END, f"{count} - {word} ({score:.1f})")
                 
             if not sorted_hints:
@@ -232,12 +239,16 @@ class CodenamesHelper:
         def sort_key(item):
             term = item[0]
             data = item[1]
-            # Prioritize clues that connect more words, then higher scores
             return (-data['count'], -data['score'], term)
         
         sorted_terms = sorted(associations.items(), key=sort_key)
         return [
-            {'word': term, 'count': data['count'], 'score': data['score']}
+            {
+                'word': term,
+                'count': data['count'],
+                'score': data['score'],
+                'connected_words': list(data['words']) 
+            }
             for term, data in sorted_terms
         ]
 
